@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Usage Monitor</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="app-header">
+        <h1>Codex Usage</h1>
+        <p>Updates every second from codexbar.</p>
+      </header>
+
+      <section class="counter-strip">
+        <article class="counter-card">
+          <span class="label">Today tokens</span>
+          <strong id="counter-today-tokens">0</strong>
+        </article>
+        <article class="counter-card">
+          <span class="label">Weekly tokens</span>
+          <strong id="counter-weekly-tokens">0</strong>
+        </article>
+        <article class="counter-card">
+          <span class="label">Daily used</span>
+          <strong id="counter-daily-used">0%</strong>
+        </article>
+        <article class="counter-card">
+          <span class="label">Weekly used</span>
+          <strong id="counter-weekly-used">0%</strong>
+        </article>
+      </section>
+
+      <section class="status-row">
+        <div>
+          <span class="label">Status</span>
+          <span id="status-text">Loading...</span>
+        </div>
+        <div>
+          <span class="label">Last update</span>
+          <span id="updated-text">-</span>
+        </div>
+      </section>
+
+      <section class="cards">
+        <article class="card" id="session-card">
+          <h2>Session Window</h2>
+          <p class="window-meta optional-compact" id="session-window">-</p>
+          <div class="meter">
+            <div class="meter-fill" id="session-meter"></div>
+          </div>
+          <div class="stats-grid">
+            <div>
+              <span class="label">Used</span>
+              <span id="session-used">-</span>
+            </div>
+            <div>
+              <span class="label">Remaining</span>
+              <span id="session-remaining">-</span>
+            </div>
+            <div class="optional-compact">
+              <span class="label">Tokens</span>
+              <span id="session-tokens">N/A</span>
+            </div>
+            <div>
+              <span class="label">Resets</span>
+              <span id="session-reset">-</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="card" id="weekly-card">
+          <h2>Weekly Window</h2>
+          <p class="window-meta optional-compact" id="weekly-window">-</p>
+          <div class="meter">
+            <div class="meter-fill" id="weekly-meter"></div>
+          </div>
+          <div class="stats-grid">
+            <div>
+              <span class="label">Used</span>
+              <span id="weekly-used">-</span>
+            </div>
+            <div>
+              <span class="label">Remaining</span>
+              <span id="weekly-remaining">-</span>
+            </div>
+            <div class="optional-compact">
+              <span class="label">Tokens</span>
+              <span id="weekly-tokens">N/A</span>
+            </div>
+            <div>
+              <span class="label">Resets</span>
+              <span id="weekly-reset">-</span>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="account optional-compact">
+        <span class="label">Account</span>
+        <span id="account-text">-</span>
+      </section>
+
+      <pre id="error-box" class="error-box hidden"></pre>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
