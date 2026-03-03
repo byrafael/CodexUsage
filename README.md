@@ -37,3 +37,31 @@ A side project to monitor ChatGPT Codex usage limits.
    ```bash
    APP_SERVER_TIMEOUT_MS=20000 bun start
    ```
+
+## CLI mode
+
+You can also run a terminal dashboard that refreshes every second without a browser:
+
+```bash
+bun cli
+```
+
+By default it reads from `http://localhost:3000/api/usage` and refreshes every second.
+
+CLI options:
+
+```bash
+# Point at a different server/port
+bun cli --server=http://localhost:3001
+bun cli 4000
+
+# Change refresh interval (milliseconds)
+bun cli --interval=500
+
+# Show only weekly info (same dataset as /week)
+bun cli week
+bun cli --mode=week
+
+# Optional env var
+CODEX_MONITOR_SERVER=http://localhost:3000 bun cli
+```
