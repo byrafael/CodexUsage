@@ -1,6 +1,7 @@
 const POLL_INTERVAL_MS = 1000;
 const ANIMATION_MS = 560;
 
+const isDay = window.location.pathname.startsWith("/day");
 const isWeekly = window.location.pathname.startsWith("/week");
 
 const elements = {
@@ -149,7 +150,11 @@ function animateValue(key, nextValue, formatter, element, fallbackText = "N/A") 
 }
 
 function renderReset(payload) {
-  const target = isWeekly ? payload?.weekly?.resetsAt : payload?.session?.resetsAt;
+  const target = isWeekly
+    ? payload?.weekly?.resetsAt
+    : isDay
+      ? payload?.cost?.dayResetsAt
+      : payload?.session?.resetsAt;
   if (!target) {
     elements.resetValue.textContent = "Reset in: --";
     return;
@@ -170,13 +175,31 @@ function render(payload) {
     return;
   }
 
-  const tokenValue = isWeekly ? payload?.cost?.weeklyTokens : payload?.cost?.todayTokens;
-  const costValue = isWeekly ? payload?.cost?.weeklyCostUSD : payload?.cost?.todayCostUSD;
-  const usedPercent = isWeekly ? payload?.weekly?.usedPercent : payload?.session?.usedPercent;
+  const tokenValue = isWeekly
+    ? payload?.cost?.weeklyTokens
+    : isDay
+      ? (payload?.cost?.dayTokens ?? payload?.cost?.todayTokens)
+      : payload?.cost?.todayTokens;
+  const costValue = isWeekly
+    ? payload?.cost?.weeklyCostUSD
+    : isDay
+      ? (payload?.cost?.dayCostUSD ?? payload?.cost?.todayCostUSD)
+      : payload?.cost?.todayCostUSD;
+  const usedPercent = isWeekly
+    ? payload?.weekly?.usedPercent
+    : isDay
+      ? null
+      : payload?.session?.usedPercent;
 
   animateValue("tokens", tokenValue, formatTokens, elements.tokenValue);
   animateValue("cost", costValue, formatCost, elements.costValue);
-  animateValue("usedPercent", usedPercent, formatUsedPercent, elements.usageValue, "--% used");
+  animateValue(
+    "usedPercent",
+    usedPercent,
+    formatUsedPercent,
+    elements.usageValue,
+    "--% used"
+  );
   renderReset(payload);
 
   const fetchedAtMs = new Date(payload.fetchedAt).getTime();

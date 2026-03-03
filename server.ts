@@ -15,8 +15,12 @@ type UsageWindow = {
 };
 
 type CostSummary = {
+  dayTokens: number | null;
+  dayCostUSD: number | null;
   todayTokens: number | null;
   weeklyTokens: number | null;
+  dayDate: string | null;
+  dayResetsAt: string | null;
   todayCostUSD: number | null;
   weeklyCostUSD: number | null;
   weeklyWindowDays: number;
@@ -52,7 +56,13 @@ const PORT = Number(Bun.env.PORT ?? 3000);
 const COMMAND_TIMEOUT_MS = 10000;
 const SNAPSHOT_REFRESH_MS = 1000;
 const WEEKLY_WINDOW_DAYS = 7;
-const APP_SERVER_TIMEOUT_MS = 7000;
+const APP_SERVER_TIMEOUT_MS = (() => {
+  const configured = Number.parseInt(Bun.env.APP_SERVER_TIMEOUT_MS ?? "", 10);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  return 15000;
+})();
 const LITELLM_PRICING_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 const LITELLM_REFRESH_MS = 6 * 60 * 60 * 1000;
@@ -209,6 +219,24 @@ function estimateCostUSD(
   }
 
   return hasValue ? total : null;
+}
+
+function resetAtForDay(day: string): string | null {
+  const parts = day.split("-");
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  const year = Number.parseInt(parts[0], 10);
+  const month = Number.parseInt(parts[1], 10);
+  const date = Number.parseInt(parts[2], 10);
+
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(date)) {
+    return null;
+  }
+
+  const nextDay = new Date(year, month - 1, date + 1, 0, 0, 0, 0);
+  return Number.isFinite(nextDay.getTime()) ? nextDay.toISOString() : null;
 }
 
 async function fetchLiteLLMPricing(): Promise<Record<string, unknown>> {
@@ -378,9 +406,21 @@ async function normalizeCostPayload(payload: unknown): Promise<CostSummary> {
     }
   }
 
+  const dayDate = todayKey;
+  const dayRow = dailyMap.get(dayDate);
+  const dayTokens = dayRow?.tokens ?? todayTokens;
+  const dayCostUSD =
+    dayRow?.estimatedCostUSD ??
+    (dayTokens === todayTokens ? todayCostUSD : null);
+  const dayResetsAt = resetAtForDay(dayDate);
+
   return {
+    dayTokens,
+    dayCostUSD,
     todayTokens,
     weeklyTokens: hasWeeklyTokens ? weeklyTokens : null,
+    dayDate,
+    dayResetsAt,
     todayCostUSD,
     weeklyCostUSD: hasWeeklyCost ? Number(weeklyCost.toFixed(6)) : null,
     weeklyWindowDays: WEEKLY_WINDOW_DAYS,
@@ -745,9 +785,9 @@ function ensureSnapshotRefreshLoop(): void {
     return;
   }
 
-  void refreshSnapshotOnce();
+  void refreshSnapshotOnce().catch(() => {});
   snapshotRefreshTimer = setInterval(() => {
-    void refreshSnapshotOnce();
+    void refreshSnapshotOnce().catch(() => {});
   }, SNAPSHOT_REFRESH_MS);
 }
 
@@ -812,10 +852,12 @@ const server = Bun.serve({
     const url = new URL(request.url);
 
     if (
-      url.pathname === "/day" ||
-      url.pathname === "/day/" ||
+      url.pathname === "/session" ||
+      url.pathname === "/session/" ||
       url.pathname === "/week" ||
-      url.pathname === "/week/"
+      url.pathname === "/week/" ||
+      url.pathname === "/day" ||
+      url.pathname === "/day/"
     ) {
       return new Response(Bun.file(join(PUBLIC_DIR, "focus.html")), {
         headers: {

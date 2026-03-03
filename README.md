@@ -24,3 +24,16 @@ A side project to monitor ChatGPT Codex usage limits.
    ```
 
 3. Open the dashboard in your browser.
+4. Focus pages are available:
+
+   - `/day` for daily token/cost view (based on `codexbar cost` daily data)
+   - `/week` for weekly token/cost and weekly window status
+   - `/session` for short-window session status
+
+   The main dashboard remains at `/`.
+
+   Tip: if `codex app-server` is slow on startup in your environment, set
+
+   ```bash
+   APP_SERVER_TIMEOUT_MS=20000 bun start
+   ```
