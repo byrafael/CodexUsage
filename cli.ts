@@ -48,23 +48,24 @@ type MonitorErrorResponse = {
 
 type MonitorResponse = MonitorSuccessResponse | MonitorErrorResponse;
 
-type CliMode = "all" | "week";
+type CliMode = "all" | "day" | "week";
 
 const POLL_INTERVAL_MS = 1000;
 const FETCH_TIMEOUT_MS = 5000;
 const DEFAULT_PORT = 3000;
 
-function parseArgs(): { serverUrl: string; intervalMs: number; mode: CliMode } {
+function parseArgs(): { serverUrl: string; intervalMs: number; mode: CliMode; showRange: boolean } {
   let serverUrl =
     Bun.env.CODEX_MONITOR_SERVER ??
     Bun.env.CLI_SERVER_URL ??
     `http://localhost:${DEFAULT_PORT}`;
   let intervalMs = POLL_INTERVAL_MS;
   let mode: CliMode = "all";
+  let showRange = false;
 
   const setMode = (value: string): void => {
     const candidate = value.toLowerCase();
-    if (candidate === "all" || candidate === "week") {
+    if (candidate === "all" || candidate === "day" || candidate === "week") {
       mode = candidate;
     }
   };
@@ -85,7 +86,16 @@ function parseArgs(): { serverUrl: string; intervalMs: number; mode: CliMode } {
       }
       continue;
     }
-    if (arg === "week" || arg === "all") {
+    if (arg === "--range") {
+      showRange = true;
+      continue;
+    }
+    if (arg.startsWith("--range=")) {
+      const value = (arg.split("=", 2)[1] ?? "").toLowerCase();
+      showRange = value === "1" || value === "true" || value === "yes";
+      continue;
+    }
+    if (arg === "week" || arg === "day" || arg === "all") {
       setMode(arg);
       continue;
     }
@@ -102,11 +112,12 @@ function parseArgs(): { serverUrl: string; intervalMs: number; mode: CliMode } {
   return {
     serverUrl,
     mode,
+    showRange,
     intervalMs: Math.max(250, intervalMs),
   };
 }
 
-const { serverUrl, intervalMs, mode } = parseArgs();
+const { serverUrl, intervalMs, mode, showRange } = parseArgs();
 const apiUrl = new URL("/api/usage", serverUrl).toString();
 const log = createLogUpdate(process.stdout, { showCursor: false });
 
@@ -123,16 +134,6 @@ function formatCurrency(value: number | null): string {
     return "$N/A";
   }
   return `$${Math.max(0, value).toFixed(2)}`;
-}
-
-function formatWindowLength(minutes: number | null): string {
-  if (minutes === null || Number.isNaN(minutes)) {
-    return "N/A";
-  }
-  if (minutes >= 60) {
-    return `${(minutes / 60).toFixed(1)}h`;
-  }
-  return `${minutes}m`;
 }
 
 function formatDate(value: string | null): string {
@@ -185,6 +186,10 @@ function formatWindowReset(windowData: UsageWindow): string {
   return `${formatCountdown(windowData.resetsAt)} (${formatDate(windowData.resetDescription ?? windowData.resetsAt)})`;
 }
 
+function formatReset(timestamp: string | null): string {
+  return `${formatCountdown(timestamp)} (${formatDate(timestamp)})`;
+}
+
 function formatAge(timestamp: string): string {
   const ageMs = Date.now() - new Date(timestamp).getTime();
   if (Number.isNaN(ageMs)) {
@@ -215,42 +220,39 @@ function pad(label: string, width = 17): string {
 
 function render(payload: MonitorResponse | null, fetchError: string | null): void {
   const lines: string[] = [];
-
-  lines.push(`Codex Usage Monitor (CLI)${mode === "week" ? " - Weekly" : ""}`);
-  lines.push(`Server: ${serverUrl}`);
+  const titlePrefix = mode === "week" ? "Weekly" : mode === "day" ? "Daily" : "Overview";
+  const titleAccount = payload?.ok ? (payload.accountEmail ?? "Unknown") : null;
+  lines.push(titleAccount ? `${titlePrefix} - ${titleAccount}` : titlePrefix);
   lines.push("");
 
   if (payload === null) {
-    lines.push("Status: waiting for first sample...");
+    lines.push("Waiting for first sample...");
     if (fetchError) {
       lines.push(`Error: ${fetchError}`);
     }
+    lines.push("");
+    lines.push("Last fetched: --");
     logUpdate(lines);
     return;
   }
 
-  const state = payload.ok ? "Live" : "Server error";
-  const stale = payload.stale ? " (stale fallback)" : "";
-  lines.push(`Status: ${state}${stale}`);
-  lines.push(`Last fetched: ${formatDate(payload.fetchedAt)} (${formatAge(payload.fetchedAt)})`);
-
-  if (payload.ok) {
-    lines.push(`Account: ${payload.accountEmail ?? "Unknown"} (${payload.loginMethod ?? "unknown"})`);
-  }
+  const staleSuffix = payload.stale ? " - stale fallback" : "";
 
   if (payload.ok) {
     if (mode === "week") {
-      lines.push("Weekly");
       lines.push(pad("Tokens") + formatInt(payload.cost.weeklyTokens));
       lines.push(pad("Cost") + formatCurrency(payload.cost.weeklyCostUSD));
       lines.push(pad("Used") + formatPercent(payload.weekly.usedPercent));
       lines.push(pad("Remaining") + formatPercent(payload.weekly.remainingPercent));
-      lines.push(pad("Window length") + formatWindowLength(payload.weekly.windowMinutes));
       lines.push(pad("Resets") + formatWindowReset(payload.weekly));
-      if (payload.cost.weeklyWindowDays > 0) {
-        lines.push(pad("Window days") + `${payload.cost.weeklyWindowDays}`);
+      if (showRange && payload.cost.rangeStart && payload.cost.rangeEnd) {
+        lines.push(pad("Range") + `${formatDate(payload.cost.rangeStart)} -> ${formatDate(payload.cost.rangeEnd)}`);
       }
-      if (payload.cost.rangeStart && payload.cost.rangeEnd) {
+    } else if (mode === "day") {
+      lines.push(pad("Tokens") + formatInt(payload.cost.dayTokens ?? payload.cost.todayTokens));
+      lines.push(pad("Cost") + formatCurrency(payload.cost.dayCostUSD ?? payload.cost.todayCostUSD));
+      lines.push(pad("Resets") + formatReset(payload.cost.dayResetsAt));
+      if (showRange && payload.cost.rangeStart && payload.cost.rangeEnd) {
         lines.push(pad("Range") + `${formatDate(payload.cost.rangeStart)} -> ${formatDate(payload.cost.rangeEnd)}`);
       }
     } else {
@@ -265,14 +267,12 @@ function render(payload: MonitorResponse | null, fetchError: string | null): voi
       lines.push("Session window");
       lines.push(pad("Used") + formatPercent(payload.session.usedPercent));
       lines.push(pad("Remaining") + formatPercent(payload.session.remainingPercent));
-      lines.push(pad("Window length") + formatWindowLength(payload.session.windowMinutes));
       lines.push(pad("Resets") + formatWindowReset(payload.session));
       lines.push("");
 
       lines.push("Weekly window");
       lines.push(pad("Used") + formatPercent(payload.weekly.usedPercent));
       lines.push(pad("Remaining") + formatPercent(payload.weekly.remainingPercent));
-      lines.push(pad("Window length") + formatWindowLength(payload.weekly.windowMinutes));
       lines.push(pad("Resets") + formatWindowReset(payload.weekly));
     }
   }
@@ -283,7 +283,7 @@ function render(payload: MonitorResponse | null, fetchError: string | null): voi
   }
 
   lines.push("");
-  lines.push("Press Ctrl+C to stop.");
+  lines.push(`Last fetched: ${formatDate(payload.fetchedAt)} (${formatAge(payload.fetchedAt)})${staleSuffix}`);
 
   logUpdate(lines);
 }

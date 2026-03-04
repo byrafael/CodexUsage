@@ -26,7 +26,7 @@ A side project to monitor ChatGPT Codex usage limits.
 3. Open the dashboard in your browser.
 4. Focus pages are available:
 
-   - `/day` for daily token/cost view (based on `codexbar cost` daily data)
+   - `/day` for daily token/cost view (token logs from `codexbar cost`, USD estimated with LiteLLM pricing)
    - `/week` for weekly token/cost and weekly window status
    - `/session` for short-window session status
 
@@ -61,6 +61,14 @@ bun cli --interval=500
 # Show only weekly info (same dataset as /week)
 bun cli week
 bun cli --mode=week
+
+# Show only daily info (same dataset as /day)
+bun cli day
+bun cli --mode=day
+
+# Include billing range line in day/week modes
+bun cli week --range
+bun cli day --range
 
 # Optional env var
 CODEX_MONITOR_SERVER=http://localhost:3000 bun cli
