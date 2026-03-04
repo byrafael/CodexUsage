@@ -7,7 +7,7 @@ A side project to monitor ChatGPT Codex usage limits.
 - Monitor daily and weekly token usage
 - Track session and weekly limit progress
 - Built with Bun and TypeScript
-- Built on top of the Codex App-Server and LiteLM (for token costs)
+- Built on top of the Codex App-Server, local Codex session logs, and LiteLLM pricing
 
 ## Getting Started
 
@@ -26,7 +26,7 @@ A side project to monitor ChatGPT Codex usage limits.
 3. Open the dashboard in your browser.
 4. Focus pages are available:
 
-   - `/day` for daily token/cost view (token logs from `codexbar cost`, USD estimated with LiteLLM pricing)
+   - `/day` for daily token/cost view (from local Codex session logs, USD estimated with LiteLLM pricing)
    - `/week` for weekly token/cost and weekly window status
    - `/session` for short-window session status
 
@@ -36,6 +36,12 @@ A side project to monitor ChatGPT Codex usage limits.
 
    ```bash
    APP_SERVER_TIMEOUT_MS=20000 bun start
+   ```
+
+   Token/cost scans from local Codex logs refresh every second by default. You can tune it with:
+
+   ```bash
+   TOKEN_USAGE_REFRESH_MS=500 bun start
    ```
 
 ## CLI mode

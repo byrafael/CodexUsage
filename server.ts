@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync, readdirSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -53,9 +53,16 @@ type MonitorResponse = MonitorSuccessResponse | MonitorErrorResponse;
 
 const PUBLIC_DIR = join(import.meta.dir, "public");
 const PORT = Number(Bun.env.PORT ?? 3000);
-const COMMAND_TIMEOUT_MS = 10000;
 const SNAPSHOT_REFRESH_MS = 1000;
 const WEEKLY_WINDOW_DAYS = 7;
+const TOKEN_USAGE_WINDOW_DAYS = 30;
+const TOKEN_USAGE_REFRESH_MS = (() => {
+  const configured = Number.parseInt(Bun.env.TOKEN_USAGE_REFRESH_MS ?? "", 10);
+  if (Number.isFinite(configured) && configured >= 250) {
+    return configured;
+  }
+  return 1000;
+})();
 const APP_SERVER_TIMEOUT_MS = (() => {
   const configured = Number.parseInt(Bun.env.APP_SERVER_TIMEOUT_MS ?? "", 10);
   if (Number.isFinite(configured) && configured > 0) {
@@ -96,6 +103,27 @@ let lastRefreshError: string | null = null;
 let cachedLiteLLMPricing: Record<string, unknown> | null = null;
 let cachedLiteLLMPricingAt = 0;
 let inflightLiteLLMPricing: Promise<Record<string, unknown>> | null = null;
+let cachedTokenUsage: TokenUsageSnapshot | null = null;
+let cachedTokenUsageAt = 0;
+let inflightTokenUsage: Promise<TokenUsageSnapshot> | null = null;
+
+type TokenUsageModelTotals = {
+  inputTokens: number;
+  outputTokens: number;
+};
+
+type TokenUsageDailyRow = {
+  date: string;
+  tokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  modelTotals: Record<string, TokenUsageModelTotals>;
+};
+
+type TokenUsageSnapshot = {
+  sourceFetchedAt: string | null;
+  daily: TokenUsageDailyRow[];
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -122,41 +150,162 @@ function dateKey(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-function pickModelFromDailyEntry(
-  entry: Record<string, unknown>
-): string | null {
-  const candidates: string[] = [];
+function dayKeyInRange(day: string, since: string, until: string): boolean {
+  return day >= since && day <= until;
+}
 
-  const modelBreakdowns = Array.isArray(entry.modelBreakdowns)
-    ? entry.modelBreakdowns
-    : [];
-  for (const breakdown of modelBreakdowns) {
-    if (!isRecord(breakdown)) {
-      continue;
-    }
-    const modelName = toStringOrNull(breakdown.modelName);
-    if (modelName) {
-      candidates.push(modelName);
-    }
-  }
-
-  const modelsUsed = Array.isArray(entry.modelsUsed) ? entry.modelsUsed : [];
-  for (const model of modelsUsed) {
-    if (typeof model === "string") {
-      candidates.push(model);
-    }
-  }
-
-  if (candidates.length === 0) {
+function dateFromDayKey(day: string): Date | null {
+  const [yearText, monthText, dayText] = day.split("-");
+  const year = Number.parseInt(yearText ?? "", 10);
+  const month = Number.parseInt(monthText ?? "", 10);
+  const date = Number.parseInt(dayText ?? "", 10);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(date)) {
     return null;
   }
 
-  const uniqueCandidates = [...new Set(candidates)];
-  if (uniqueCandidates.includes(DEFAULT_COST_MODEL)) {
-    return DEFAULT_COST_MODEL;
+  const value = new Date(year, month - 1, date, 12, 0, 0, 0);
+  return Number.isFinite(value.getTime()) ? value : null;
+}
+
+function dayKeyFromFilename(fileName: string): string | null {
+  const match = fileName.match(/(\d{4}-\d{2}-\d{2})/);
+  return match?.[1] ?? null;
+}
+
+function buildDayKeysInclusive(start: Date, end: Date): string[] {
+  const keys: string[] = [];
+  const cursor = new Date(start);
+  while (cursor <= end) {
+    keys.push(dateKey(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return keys;
+}
+
+function codexSessionsRoot(): string {
+  const configured = Bun.env.CODEX_HOME?.trim();
+  if (configured) {
+    return join(configured, "sessions");
   }
 
-  return uniqueCandidates[0] ?? null;
+  const home = Bun.env.HOME ?? process.env.HOME ?? "";
+  return join(home, ".codex", "sessions");
+}
+
+function codexArchivedSessionsRoot(sessionsRoot: string): string {
+  return join(sessionsRoot, "..", "archived_sessions");
+}
+
+function listSessionFilesByDatePartition(
+  root: string,
+  scanSinceKey: string,
+  scanUntilKey: string
+): string[] {
+  if (!existsSync(root)) {
+    return [];
+  }
+
+  const start = dateFromDayKey(scanSinceKey);
+  const end = dateFromDayKey(scanUntilKey);
+  if (!start || !end) {
+    return [];
+  }
+
+  const files: string[] = [];
+  for (const key of buildDayKeysInclusive(start, end)) {
+    const [year, month, day] = key.split("-");
+    const dayDir = join(root, year ?? "", month ?? "", day ?? "");
+    if (!existsSync(dayDir)) {
+      continue;
+    }
+
+    for (const name of readdirSync(dayDir)) {
+      if (!name.toLowerCase().endsWith(".jsonl")) {
+        continue;
+      }
+      files.push(join(dayDir, name));
+    }
+  }
+
+  return files;
+}
+
+function listSessionFilesFlat(
+  root: string,
+  scanSinceKey: string,
+  scanUntilKey: string
+): string[] {
+  if (!existsSync(root)) {
+    return [];
+  }
+
+  const files: string[] = [];
+  for (const name of readdirSync(root)) {
+    if (!name.toLowerCase().endsWith(".jsonl")) {
+      continue;
+    }
+
+    const dayFromName = dayKeyFromFilename(name);
+    if (dayFromName && !dayKeyInRange(dayFromName, scanSinceKey, scanUntilKey)) {
+      continue;
+    }
+
+    files.push(join(root, name));
+  }
+
+  return files;
+}
+
+function listCodexSessionFiles(scanSinceKey: string, scanUntilKey: string): string[] {
+  const sessionsRoot = codexSessionsRoot();
+  const archivedRoot = codexArchivedSessionsRoot(sessionsRoot);
+  const combined = [
+    ...listSessionFilesByDatePartition(sessionsRoot, scanSinceKey, scanUntilKey),
+    ...listSessionFilesFlat(sessionsRoot, scanSinceKey, scanUntilKey),
+    ...listSessionFilesByDatePartition(archivedRoot, scanSinceKey, scanUntilKey),
+    ...listSessionFilesFlat(archivedRoot, scanSinceKey, scanUntilKey),
+  ];
+
+  return [...new Set(combined)];
+}
+
+function toIntOrZero(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.trunc(value));
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) {
+      return Math.max(0, parsed);
+    }
+  }
+  return 0;
+}
+
+function toDayKeyFromTimestamp(value: string): string | null {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) {
+    return null;
+  }
+  return dateKey(parsed);
+}
+
+function usageTotalsFromRecord(value: unknown): {
+  input: number;
+  cached: number;
+  output: number;
+} {
+  const obj = isRecord(value) ? value : {};
+  return {
+    input: toIntOrZero(obj.input_tokens ?? obj.inputTokens),
+    cached: toIntOrZero(
+      obj.cached_input_tokens ??
+        obj.cachedInputTokens ??
+        obj.cache_read_input_tokens ??
+        obj.cacheReadInputTokens
+    ),
+    output: toIntOrZero(obj.output_tokens ?? obj.outputTokens),
+  };
 }
 
 function modelLookupCandidates(modelName: string): string[] {
@@ -288,48 +437,247 @@ async function getLiteLLMPricing(): Promise<Record<string, unknown>> {
   return inflightLiteLLMPricing;
 }
 
-async function normalizeCostPayload(payload: unknown): Promise<CostSummary> {
-  const root = Array.isArray(payload) ? payload[0] : payload;
-  const rootObj = isRecord(root) ? root : {};
-  const updatedAt = toStringOrNull(rootObj.updatedAt);
-  const daily = Array.isArray(rootObj.daily) ? rootObj.daily : [];
+async function scanTokenUsageFile(
+  filePath: string,
+  scanSinceKey: string,
+  scanUntilKey: string,
+  dailyMap: Map<string, TokenUsageDailyRow>
+): Promise<void> {
+  let currentModel: string | null = null;
+  let previousTotals: { input: number; cached: number; output: number } | null =
+    null;
+
+  const reader = createInterface({
+    input: createReadStream(filePath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+
+  for await (const line of reader) {
+    if (!line.includes('"event_msg"') && !line.includes('"turn_context"')) {
+      continue;
+    }
+
+    const parsed = parseJsonLine(line);
+    if (!isRecord(parsed)) {
+      continue;
+    }
+
+    const type = toStringOrNull(parsed.type);
+    if (type === "turn_context") {
+      const payload = isRecord(parsed.payload) ? parsed.payload : {};
+      const info = isRecord(payload.info) ? payload.info : {};
+      currentModel =
+        toStringOrNull(payload.model) ?? toStringOrNull(info.model) ?? currentModel;
+      continue;
+    }
+
+    if (type !== "event_msg") {
+      continue;
+    }
+
+    const payload = isRecord(parsed.payload) ? parsed.payload : {};
+    if (toStringOrNull(payload.type) !== "token_count") {
+      continue;
+    }
+
+    const timestampText = toStringOrNull(parsed.timestamp);
+    if (!timestampText) {
+      continue;
+    }
+
+    const day = toDayKeyFromTimestamp(timestampText);
+    if (!day || !dayKeyInRange(day, scanSinceKey, scanUntilKey)) {
+      continue;
+    }
+
+    const info = isRecord(payload.info) ? payload.info : {};
+    const totalUsage = info.total_token_usage ?? info.totalTokenUsage;
+    const lastUsage = info.last_token_usage ?? info.lastTokenUsage;
+    const hasTotalUsage = isRecord(totalUsage);
+    const hasLastUsage = isRecord(lastUsage);
+
+    let deltaInput = 0;
+    let deltaCached = 0;
+    let deltaOutput = 0;
+
+    if (hasTotalUsage) {
+      const totals = usageTotalsFromRecord(totalUsage);
+      deltaInput = Math.max(0, totals.input - (previousTotals?.input ?? 0));
+      deltaCached = Math.max(0, totals.cached - (previousTotals?.cached ?? 0));
+      deltaOutput = Math.max(0, totals.output - (previousTotals?.output ?? 0));
+      previousTotals = totals;
+    } else if (hasLastUsage) {
+      const last = usageTotalsFromRecord(lastUsage);
+      deltaInput = last.input;
+      deltaCached = last.cached;
+      deltaOutput = last.output;
+    } else {
+      continue;
+    }
+
+    if (deltaInput === 0 && deltaCached === 0 && deltaOutput === 0) {
+      continue;
+    }
+
+    const model =
+      toStringOrNull(info.model) ??
+      toStringOrNull(info.model_name) ??
+      toStringOrNull(payload.model) ??
+      toStringOrNull(parsed.model) ??
+      currentModel ??
+      DEFAULT_COST_MODEL;
+    const dayTotalTokens = deltaInput + deltaOutput;
+
+    const dayRow =
+      dailyMap.get(day) ??
+      ({
+        date: day,
+        tokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        modelTotals: {},
+      } satisfies TokenUsageDailyRow);
+
+    dayRow.tokens += dayTotalTokens;
+    dayRow.inputTokens += deltaInput;
+    dayRow.outputTokens += deltaOutput;
+
+    const modelTotals = dayRow.modelTotals[model] ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+    };
+    modelTotals.inputTokens += deltaInput;
+    modelTotals.outputTokens += deltaOutput;
+
+    dayRow.modelTotals[model] = modelTotals;
+    dailyMap.set(day, dayRow);
+  }
+
+  reader.close();
+}
+
+async function fetchTokenUsageSnapshot(): Promise<TokenUsageSnapshot> {
+  const now = new Date();
+  const since = new Date(now);
+  since.setDate(now.getDate() - (TOKEN_USAGE_WINDOW_DAYS - 1));
+
+  const scanSince = new Date(since);
+  scanSince.setDate(scanSince.getDate() - 1);
+  const scanUntil = new Date(now);
+  scanUntil.setDate(scanUntil.getDate() + 1);
+
+  const sinceKey = dateKey(since);
+  const untilKey = dateKey(now);
+  const scanSinceKey = dateKey(scanSince);
+  const scanUntilKey = dateKey(scanUntil);
+
+  const files = listCodexSessionFiles(scanSinceKey, scanUntilKey);
+  const dailyMap = new Map<string, TokenUsageDailyRow>();
+
+  for (const filePath of files) {
+    try {
+      await scanTokenUsageFile(
+        filePath,
+        scanSinceKey,
+        scanUntilKey,
+        dailyMap
+      );
+    } catch {
+      continue;
+    }
+  }
+
+  const daily = [...dailyMap.values()]
+    .filter((row) => dayKeyInRange(row.date, sinceKey, untilKey))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  return {
+    sourceFetchedAt: new Date().toISOString(),
+    daily,
+  };
+}
+
+async function getTokenUsageSnapshot(): Promise<TokenUsageSnapshot> {
+  const now = Date.now();
+  if (cachedTokenUsage && now - cachedTokenUsageAt < TOKEN_USAGE_REFRESH_MS) {
+    return cachedTokenUsage;
+  }
+
+  if (inflightTokenUsage) {
+    return inflightTokenUsage;
+  }
+
+  inflightTokenUsage = fetchTokenUsageSnapshot()
+    .then((snapshot) => {
+      cachedTokenUsage = snapshot;
+      cachedTokenUsageAt = Date.now();
+      return snapshot;
+    })
+    .catch((error) => {
+      if (cachedTokenUsage) {
+        return cachedTokenUsage;
+      }
+      throw error;
+    })
+    .finally(() => {
+      inflightTokenUsage = null;
+    });
+
+  return inflightTokenUsage;
+}
+
+async function normalizeCostPayload(
+  payload: TokenUsageSnapshot
+): Promise<CostSummary> {
   const liteLLMPricing = await getLiteLLMPricing().catch(() => ({}));
   const dailyRows: Array<{
     date: string;
-    tokens: number | null;
-    inputTokens: number | null;
-    outputTokens: number | null;
+    tokens: number;
+    inputTokens: number;
+    outputTokens: number;
     estimatedCostUSD: number | null;
   }> = [];
 
-  for (const entry of daily) {
-    if (!isRecord(entry)) {
-      continue;
+  for (const entry of payload.daily) {
+    let estimatedCost = 0;
+    let hasEstimatedCost = false;
+
+    for (const [modelName, totals] of Object.entries(entry.modelTotals)) {
+      const modelPricing =
+        lookupLiteLLMPricing(liteLLMPricing, modelName) ??
+        lookupLiteLLMPricing(liteLLMPricing, DEFAULT_COST_MODEL) ??
+        DEFAULT_MODEL_PRICING;
+
+      const modelCost = estimateCostUSD(
+        totals.inputTokens,
+        totals.outputTokens,
+        modelPricing
+      );
+      if (modelCost !== null) {
+        estimatedCost += modelCost;
+        hasEstimatedCost = true;
+      }
     }
 
-    const day = toStringOrNull(entry.date);
-    if (!day) {
-      continue;
+    if (!hasEstimatedCost) {
+      const fallbackCost = estimateCostUSD(
+        entry.inputTokens,
+        entry.outputTokens,
+        lookupLiteLLMPricing(liteLLMPricing, DEFAULT_COST_MODEL) ??
+          DEFAULT_MODEL_PRICING
+      );
+      if (fallbackCost !== null) {
+        estimatedCost = fallbackCost;
+        hasEstimatedCost = true;
+      }
     }
-
-    const inputTokens = toNumberOrNull(entry.inputTokens);
-    const outputTokens = toNumberOrNull(entry.outputTokens);
-    const modelName = pickModelFromDailyEntry(entry) ?? DEFAULT_COST_MODEL;
-    const modelPricing =
-      lookupLiteLLMPricing(liteLLMPricing, modelName) ??
-      lookupLiteLLMPricing(liteLLMPricing, DEFAULT_COST_MODEL) ??
-      DEFAULT_MODEL_PRICING;
 
     dailyRows.push({
-      date: day,
-      tokens: toNumberOrNull(entry.totalTokens),
-      inputTokens,
-      outputTokens,
-      estimatedCostUSD: estimateCostUSD(
-        inputTokens,
-        outputTokens,
-        modelPricing
-      ),
+      date: entry.date,
+      tokens: entry.tokens,
+      inputTokens: entry.inputTokens,
+      outputTokens: entry.outputTokens,
+      estimatedCostUSD: hasEstimatedCost ? estimatedCost : null,
     });
   }
 
@@ -338,17 +686,10 @@ async function normalizeCostPayload(payload: unknown): Promise<CostSummary> {
 
   const todayKey = dateKey(new Date());
   const todayRow = dailyMap.get(todayKey);
-  const todayTokens =
-    todayRow?.tokens ?? toNumberOrNull(rootObj.sessionTokens) ?? null;
-  const sameTokenRow =
-    todayTokens === null
-      ? null
-      : [...dailyRows]
-          .reverse()
-          .find((row) => row.tokens !== null && row.tokens === todayTokens) ??
-        null;
+  const latestRow = dailyRows[dailyRows.length - 1] ?? null;
+  const todayTokens = todayRow?.tokens ?? latestRow?.tokens ?? null;
   const todayCostUSD =
-    todayRow?.estimatedCostUSD ?? sameTokenRow?.estimatedCostUSD ?? null;
+    todayRow?.estimatedCostUSD ?? latestRow?.estimatedCostUSD ?? null;
 
   let weeklyTokens = 0;
   let weeklyCost = 0;
@@ -371,7 +712,7 @@ async function normalizeCostPayload(payload: unknown): Promise<CostSummary> {
     }
 
     const row = dailyMap.get(key);
-    if (row?.tokens !== null && row?.tokens !== undefined) {
+    if (row) {
       weeklyTokens += row.tokens;
       hasWeeklyTokens = true;
     }
@@ -391,10 +732,8 @@ async function normalizeCostPayload(payload: unknown): Promise<CostSummary> {
       hasWeeklyCost = false;
 
       for (const row of lastSeven) {
-        if (row.tokens !== null) {
-          weeklyTokens += row.tokens;
-          hasWeeklyTokens = true;
-        }
+        weeklyTokens += row.tokens;
+        hasWeeklyTokens = true;
         if (row.estimatedCostUSD !== null) {
           weeklyCost += row.estimatedCostUSD;
           hasWeeklyCost = true;
@@ -426,7 +765,7 @@ async function normalizeCostPayload(payload: unknown): Promise<CostSummary> {
     weeklyWindowDays: WEEKLY_WINDOW_DAYS,
     rangeStart,
     rangeEnd,
-    sourceFetchedAt: updatedAt,
+    sourceFetchedAt: payload.sourceFetchedAt,
   };
 }
 
@@ -688,61 +1027,13 @@ async function requestAppServerSnapshot(): Promise<{
   });
 }
 
-async function runCodexbarJson(
-  commandArgs: string[],
-  label: string
-): Promise<unknown> {
-  const proc = Bun.spawn(["codexbar", ...commandArgs], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    proc.kill();
-  }, COMMAND_TIMEOUT_MS);
-
-  try {
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-
-    if (timedOut) {
-      throw new Error(`${label} timed out after ${COMMAND_TIMEOUT_MS}ms`);
-    }
-
-    if (exitCode !== 0) {
-      const message = stderr.trim() || stdout.trim() || `Exit code ${exitCode}`;
-      throw new Error(`${label} failed: ${message}`);
-    }
-
-    if (!stdout.trim()) {
-      throw new Error(`${label} returned empty output`);
-    }
-
-    try {
-      return JSON.parse(stdout);
-    } catch {
-      throw new Error(`${label} returned invalid JSON`);
-    }
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function runMonitorCommands(): Promise<MonitorSuccessResponse> {
-  const [usage, costRaw] = await Promise.all([
+  const [usage, tokenUsage] = await Promise.all([
     requestAppServerSnapshot(),
-    runCodexbarJson(
-      ["cost", "--provider", "codex", "--format", "json", "--refresh"],
-      "codexbar cost"
-    ),
+    getTokenUsageSnapshot(),
   ]);
 
-  const cost = await normalizeCostPayload(costRaw);
+  const cost = await normalizeCostPayload(tokenUsage);
 
   return {
     ok: true,
