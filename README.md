@@ -53,6 +53,7 @@ bun cli
 ```
 
 By default it reads from `http://localhost:3000/api/usage` and refreshes every second.
+Timestamps use 24-hour time by default; pass `--12hr` to show 12-hour time.
 
 CLI options:
 

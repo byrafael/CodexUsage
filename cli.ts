@@ -54,7 +54,13 @@ const POLL_INTERVAL_MS = 1000;
 const FETCH_TIMEOUT_MS = 5000;
 const DEFAULT_PORT = 3000;
 
-function parseArgs(): { serverUrl: string; intervalMs: number; mode: CliMode; showRange: boolean } {
+function parseArgs(): {
+  serverUrl: string;
+  intervalMs: number;
+  mode: CliMode;
+  showRange: boolean;
+  use12HourClock: boolean;
+} {
   let serverUrl =
     Bun.env.CODEX_MONITOR_SERVER ??
     Bun.env.CLI_SERVER_URL ??
@@ -62,6 +68,7 @@ function parseArgs(): { serverUrl: string; intervalMs: number; mode: CliMode; sh
   let intervalMs = POLL_INTERVAL_MS;
   let mode: CliMode = "all";
   let showRange = false;
+  let use12HourClock = false;
 
   const setMode = (value: string): void => {
     const candidate = value.toLowerCase();
@@ -90,6 +97,15 @@ function parseArgs(): { serverUrl: string; intervalMs: number; mode: CliMode; sh
       showRange = true;
       continue;
     }
+    if (arg === "--12hr") {
+      use12HourClock = true;
+      continue;
+    }
+    if (arg.startsWith("--12hr=")) {
+      const value = (arg.split("=", 2)[1] ?? "").toLowerCase();
+      use12HourClock = value === "1" || value === "true" || value === "yes";
+      continue;
+    }
     if (arg.startsWith("--range=")) {
       const value = (arg.split("=", 2)[1] ?? "").toLowerCase();
       showRange = value === "1" || value === "true" || value === "yes";
@@ -113,11 +129,12 @@ function parseArgs(): { serverUrl: string; intervalMs: number; mode: CliMode; sh
     serverUrl,
     mode,
     showRange,
+    use12HourClock,
     intervalMs: Math.max(250, intervalMs),
   };
 }
 
-const { serverUrl, intervalMs, mode, showRange } = parseArgs();
+const { serverUrl, intervalMs, mode, showRange, use12HourClock } = parseArgs();
 const apiUrl = new URL("/api/usage", serverUrl).toString();
 const log = createLogUpdate(process.stdout, { showCursor: false });
 
@@ -144,7 +161,15 @@ function formatDate(value: string | null): string {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  return date.toLocaleString();
+  return date.toLocaleString([], {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: use12HourClock,
+  });
 }
 
 function secondsFromNow(timestamp: string | null): number {
@@ -183,7 +208,7 @@ function formatCountdown(timestamp: string | null): string {
 }
 
 function formatWindowReset(windowData: UsageWindow): string {
-  return `${formatCountdown(windowData.resetsAt)} (${formatDate(windowData.resetDescription ?? windowData.resetsAt)})`;
+  return `${formatCountdown(windowData.resetsAt)} (${formatDate(windowData.resetsAt ?? windowData.resetDescription)})`;
 }
 
 function formatReset(timestamp: string | null): string {
