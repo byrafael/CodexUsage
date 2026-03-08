@@ -1,6 +1,6 @@
 const POLL_INTERVAL_MS = 1000;
 const RENDER_WIDTH = 1280;
-const RENDER_HEIGHT = 720;
+const RENDER_HEIGHT = 560;
 const STREAM_FPS = 24;
 
 const mode = window.location.pathname.startsWith("/week")
@@ -308,11 +308,11 @@ function drawBackground(context, accent, accentSoft, now) {
 
   const secondary = context.createRadialGradient(
     1040,
-    620,
+    470,
     60,
     1040,
-    620,
-    300 + pulse * 80
+    470,
+    240 + pulse * 70
   );
   secondary.addColorStop(0, `${accent}33`);
   secondary.addColorStop(0.4, "#1d2d4333");
@@ -342,56 +342,56 @@ function drawFrame(now) {
   const costText = formatCost(costDisplayValue);
   drawBackground(canvasContext, view.accent, view.accentSoft, now);
 
-  roundedRect(canvasContext, 60, 56, 1160, 608, 38);
+  roundedRect(canvasContext, 60, 42, 1160, 476, 34);
   canvasContext.fillStyle = "rgba(6, 10, 16, 0.78)";
   canvasContext.fill();
   canvasContext.strokeStyle = "rgba(255, 255, 255, 0.08)";
   canvasContext.lineWidth = 2;
   canvasContext.stroke();
 
-  roundedRect(canvasContext, 94, 92, 190, 42, 21);
+  roundedRect(canvasContext, 94, 72, 190, 38, 19);
   canvasContext.fillStyle = view.accent;
   canvasContext.fill();
 
   canvasContext.fillStyle = "#04101d";
-  canvasContext.font = "700 20px IBM Plex Sans";
+  canvasContext.font = "700 18px IBM Plex Sans";
   canvasContext.textBaseline = "middle";
-  canvasContext.fillText(view.badge, 116, 114);
+  canvasContext.fillText(view.badge, 116, 91);
 
   canvasContext.fillStyle = "#f3f7ff";
-  canvasContext.font = "600 58px IBM Plex Sans";
+  canvasContext.font = "600 52px IBM Plex Sans";
   canvasContext.textBaseline = "alphabetic";
-  drawSpacedText(canvasContext, view.title, 94, 210, 1.6);
+  drawSpacedText(canvasContext, view.title, 94, 165, 1.4);
 
   if (view.tokenLabel) {
     canvasContext.fillStyle = "rgba(239, 246, 255, 0.68)";
-    canvasContext.font = "500 24px IBM Plex Sans";
-    canvasContext.fillText(view.tokenLabel, 94, 306);
+    canvasContext.font = "500 22px IBM Plex Sans";
+    canvasContext.fillText(view.tokenLabel, 94, 220);
   }
 
   canvasContext.fillStyle = view.accent;
-  canvasContext.font = "700 142px IBM Plex Sans";
-  canvasContext.fillText(tokenText, 94, 470);
+  canvasContext.font = "700 124px IBM Plex Sans";
+  canvasContext.fillText(tokenText, 94, 336);
 
   canvasContext.fillStyle = "#edf4ff";
-  canvasContext.font = "600 44px IBM Plex Sans";
+  canvasContext.font = "600 38px IBM Plex Sans";
   const costLine = view.costLabel ? `${view.costLabel} ${costText}` : costText;
-  canvasContext.fillText(costLine, 94, 564);
+  canvasContext.fillText(costLine, 94, 404);
 
   canvasContext.fillStyle = "rgba(239, 246, 255, 0.72)";
-  canvasContext.font = "500 28px IBM Plex Sans";
-  canvasContext.fillText(view.resetText, 94, 602);
-  canvasContext.fillText(view.usageText, 94, 640);
+  canvasContext.font = "500 24px IBM Plex Sans";
+  canvasContext.fillText(view.resetText, 94, 462);
+  canvasContext.fillText(view.usageText, 94, 494);
 
   canvasContext.textAlign = "right";
   canvasContext.fillStyle = view.stale ? "#ffcc88" : "rgba(239, 246, 255, 0.62)";
-  canvasContext.font = "500 25px IBM Plex Sans";
-  canvasContext.fillText(view.updatedText, 1184, 602);
+  canvasContext.font = "500 22px IBM Plex Sans";
+  canvasContext.fillText(view.updatedText, 1184, 462);
 
   if (view.errorText) {
     canvasContext.fillStyle = "#ff9d84";
-    canvasContext.font = "500 23px IBM Plex Sans";
-    canvasContext.fillText(view.errorText.slice(0, 72), 1184, 640);
+    canvasContext.font = "500 20px IBM Plex Sans";
+    canvasContext.fillText(view.errorText.slice(0, 84), 1184, 494);
   }
   canvasContext.textAlign = "left";
 
