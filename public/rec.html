@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Recorder</title>
+    <link rel="stylesheet" href="/rec.css" />
+  </head>
+  <body>
+    <main class="rec-shell">
+      <section class="rec-copy">
+        <p class="eyebrow">Always-on usage render</p>
+        <h1 id="rec-heading">Live recorder</h1>
+        <p id="rec-description" class="rec-description">
+          Open Picture in Picture and keep this pinned while you work.
+        </p>
+        <div class="rec-actions">
+          <button id="pip-toggle" type="button">Open PiP</button>
+          <span id="pip-support" class="pip-support">Starting stream...</span>
+        </div>
+      </section>
+
+      <section class="rec-stage">
+        <video
+          id="rec-video"
+          class="rec-video"
+          autoplay
+          muted
+          playsinline
+        ></video>
+        <canvas
+          id="rec-canvas"
+          class="rec-canvas"
+          width="1280"
+          height="720"
+          aria-hidden="true"
+        ></canvas>
+      </section>
+    </main>
+
+    <script src="/rec.js" type="module"></script>
+  </body>
+</html>

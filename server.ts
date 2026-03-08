@@ -1,4 +1,9 @@
-import { createReadStream, existsSync, readdirSync } from "node:fs";
+import {
+  createReadStream,
+  existsSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -34,6 +39,7 @@ type MonitorSuccessResponse = {
   stale: boolean;
   fetchedAt: string;
   sourceFetchedAt: string | null;
+  modelLabel: string | null;
   accountEmail: string | null;
   loginMethod: string | null;
   session: UsageWindow;
@@ -75,6 +81,7 @@ const LITELLM_PRICING_URL =
 const LITELLM_REFRESH_MS = 6 * 60 * 60 * 1000;
 const LITELLM_FETCH_TIMEOUT_MS = 4000;
 const DEFAULT_COST_MODEL = "gpt-5.3-codex";
+const CODEX_RATE_LIMIT_FETCH_ERROR = "failed to fetch codex rate limits";
 
 type LiteLLMModelPricing = {
   input_cost_per_token?: number;
@@ -123,6 +130,18 @@ type TokenUsageDailyRow = {
 type TokenUsageSnapshot = {
   sourceFetchedAt: string | null;
   daily: TokenUsageDailyRow[];
+  latestModel: string | null;
+};
+
+type AppServerSoftFailure = {
+  matchText: string;
+  result: unknown;
+};
+
+type AppServerPendingRequest = {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  softFailure: AppServerSoftFailure | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -172,6 +191,16 @@ function dayKeyFromFilename(fileName: string): string | null {
   return match?.[1] ?? null;
 }
 
+function codexRoot(): string {
+  const configured = Bun.env.CODEX_HOME?.trim();
+  if (configured) {
+    return configured;
+  }
+
+  const home = Bun.env.HOME ?? process.env.HOME ?? "";
+  return join(home, ".codex");
+}
+
 function buildDayKeysInclusive(start: Date, end: Date): string[] {
   const keys: string[] = [];
   const cursor = new Date(start);
@@ -183,13 +212,7 @@ function buildDayKeysInclusive(start: Date, end: Date): string[] {
 }
 
 function codexSessionsRoot(): string {
-  const configured = Bun.env.CODEX_HOME?.trim();
-  if (configured) {
-    return join(configured, "sessions");
-  }
-
-  const home = Bun.env.HOME ?? process.env.HOME ?? "";
-  return join(home, ".codex", "sessions");
+  return join(codexRoot(), "sessions");
 }
 
 function codexArchivedSessionsRoot(sessionsRoot: string): string {
@@ -441,7 +464,8 @@ async function scanTokenUsageFile(
   filePath: string,
   scanSinceKey: string,
   scanUntilKey: string,
-  dailyMap: Map<string, TokenUsageDailyRow>
+  dailyMap: Map<string, TokenUsageDailyRow>,
+  latestModelState: { model: string | null; timestampMs: number }
 ): Promise<void> {
   let currentModel: string | null = null;
   let previousTotals: { input: number; cached: number; output: number } | null =
@@ -466,8 +490,10 @@ async function scanTokenUsageFile(
     if (type === "turn_context") {
       const payload = isRecord(parsed.payload) ? parsed.payload : {};
       const info = isRecord(payload.info) ? payload.info : {};
+      const timestampText = toStringOrNull(parsed.timestamp);
       currentModel =
         toStringOrNull(payload.model) ?? toStringOrNull(info.model) ?? currentModel;
+      maybeUpdateLatestModel(latestModelState, currentModel, timestampText);
       continue;
     }
 
@@ -526,6 +552,7 @@ async function scanTokenUsageFile(
       toStringOrNull(parsed.model) ??
       currentModel ??
       DEFAULT_COST_MODEL;
+    maybeUpdateLatestModel(latestModelState, model, timestampText);
     const dayTotalTokens = deltaInput + deltaOutput;
 
     const dayRow =
@@ -573,6 +600,10 @@ async function fetchTokenUsageSnapshot(): Promise<TokenUsageSnapshot> {
 
   const files = listCodexSessionFiles(scanSinceKey, scanUntilKey);
   const dailyMap = new Map<string, TokenUsageDailyRow>();
+  const latestModelState = {
+    model: null as string | null,
+    timestampMs: Number.NEGATIVE_INFINITY,
+  };
 
   for (const filePath of files) {
     try {
@@ -580,7 +611,8 @@ async function fetchTokenUsageSnapshot(): Promise<TokenUsageSnapshot> {
         filePath,
         scanSinceKey,
         scanUntilKey,
-        dailyMap
+        dailyMap,
+        latestModelState
       );
     } catch {
       continue;
@@ -594,6 +626,7 @@ async function fetchTokenUsageSnapshot(): Promise<TokenUsageSnapshot> {
   return {
     sourceFetchedAt: new Date().toISOString(),
     daily,
+    latestModel: latestModelState.model,
   };
 }
 
@@ -832,6 +865,52 @@ function parseJsonLine(line: string): unknown {
   }
 }
 
+function configuredCodexModel(): string | null {
+  const configPath = join(codexRoot(), "config.toml");
+  if (!existsSync(configPath)) {
+    return null;
+  }
+
+  try {
+    const configText = readFileSync(configPath, "utf8");
+    const match = configText.match(/(?:^|\n)model\s*=\s*"([^"\n]+)"/);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function displayModelLabel(modelName: string | null): string | null {
+  if (!modelName) {
+    return null;
+  }
+
+  const bare = modelName.split("/").pop() ?? modelName;
+  return bare
+    .replace(/^gpt/i, "GPT")
+    .replace(/-codex/gi, " Codex")
+    .replace(/-mini/gi, " Mini")
+    .replace(/-spark/gi, " Spark");
+}
+
+function maybeUpdateLatestModel(
+  latestModelState: { model: string | null; timestampMs: number },
+  modelName: string | null,
+  timestampText: string | null
+): void {
+  if (!modelName || !timestampText) {
+    return;
+  }
+
+  const timestampMs = new Date(timestampText).getTime();
+  if (!Number.isFinite(timestampMs) || timestampMs < latestModelState.timestampMs) {
+    return;
+  }
+
+  latestModelState.model = modelName;
+  latestModelState.timestampMs = timestampMs;
+}
+
 async function requestAppServerSnapshot(): Promise<{
   sourceFetchedAt: string | null;
   accountEmail: string | null;
@@ -846,13 +925,7 @@ async function requestAppServerSnapshot(): Promise<{
 
     let finished = false;
     let nextRequestId = 1;
-    const pending = new Map<
-      number,
-      {
-        resolve: (value: unknown) => void;
-        reject: (error: Error) => void;
-      }
-    >();
+    const pending = new Map<number, AppServerPendingRequest>();
     const stderrChunks: string[] = [];
 
     const failAllPending = (error: Error) => {
@@ -917,6 +990,13 @@ async function requestAppServerSnapshot(): Promise<{
         const errorMessage =
           toStringOrNull(message.error.message) ??
           `Request ${id} failed with app-server error`;
+        if (
+          waiter.softFailure &&
+          errorMessage.includes(waiter.softFailure.matchText)
+        ) {
+          waiter.resolve(waiter.softFailure.result);
+          return;
+        }
         waiter.reject(new Error(errorMessage));
         return;
       }
@@ -953,7 +1033,8 @@ async function requestAppServerSnapshot(): Promise<{
 
     const sendRequest = async (
       method: string,
-      params: unknown
+      params: unknown,
+      options: { softFailure?: AppServerSoftFailure } = {}
     ): Promise<unknown> => {
       const id = nextRequestId;
       nextRequestId += 1;
@@ -962,7 +1043,11 @@ async function requestAppServerSnapshot(): Promise<{
 
       const responsePromise = new Promise<unknown>(
         (resolveResponse, rejectResponse) => {
-          pending.set(id, { resolve: resolveResponse, reject: rejectResponse });
+          pending.set(id, {
+            resolve: resolveResponse,
+            reject: rejectResponse,
+            softFailure: options.softFailure ?? null,
+          });
         }
       );
 
@@ -981,10 +1066,15 @@ async function requestAppServerSnapshot(): Promise<{
         await sendRequest("initialize", {
           clientInfo: { name: "codexusage-monitor", version: "0.1.0" },
         });
-
         const rateLimitsRaw = await sendRequest(
           "account/rateLimits/read",
-          null
+          null,
+          {
+            softFailure: {
+              matchText: CODEX_RATE_LIMIT_FETCH_ERROR,
+              result: {},
+            },
+          }
         );
         const accountRaw = await sendRequest("account/read", {
           refreshToken: false,
@@ -1034,12 +1124,16 @@ async function runMonitorCommands(): Promise<MonitorSuccessResponse> {
   ]);
 
   const cost = await normalizeCostPayload(tokenUsage);
+  const modelLabel = displayModelLabel(
+    tokenUsage.latestModel ?? configuredCodexModel()
+  );
 
   return {
     ok: true,
     stale: false,
     fetchedAt: new Date().toISOString(),
     sourceFetchedAt: usage.sourceFetchedAt,
+    modelLabel,
     accountEmail: usage.accountEmail,
     loginMethod: usage.loginMethod,
     session: usage.session,
@@ -1151,6 +1245,22 @@ const server = Bun.serve({
       url.pathname === "/day/"
     ) {
       return new Response(Bun.file(join(PUBLIC_DIR, "focus.html")), {
+        headers: {
+          "cache-control": "no-store",
+          "content-type": "text/html; charset=utf-8",
+        },
+      });
+    }
+
+    if (
+      url.pathname === "/session/rec" ||
+      url.pathname === "/session/rec/" ||
+      url.pathname === "/week/rec" ||
+      url.pathname === "/week/rec/" ||
+      url.pathname === "/day/rec" ||
+      url.pathname === "/day/rec/"
+    ) {
+      return new Response(Bun.file(join(PUBLIC_DIR, "rec.html")), {
         headers: {
           "cache-control": "no-store",
           "content-type": "text/html; charset=utf-8",

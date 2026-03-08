@@ -5,6 +5,7 @@ const isDay = window.location.pathname.startsWith("/day");
 const isWeekly = window.location.pathname.startsWith("/week");
 
 const elements = {
+  titleValue: document.querySelector("#focus-title"),
   tokenValue: document.querySelector("#token-value"),
   costValue: document.querySelector("#cost-value"),
   resetValue: document.querySelector("#reset-value"),
@@ -97,6 +98,22 @@ function updatedStatusFromLastFetch() {
   return formatUpdatedAgo(lastFetchedAtMs);
 }
 
+function formatTitle(payload) {
+  const modelLabel = payload?.modelLabel;
+  if (typeof modelLabel !== "string" || modelLabel.length === 0) {
+    return "Codex Model";
+  }
+  return modelLabel;
+}
+
+function renderTitle(payload) {
+  const title = formatTitle(payload);
+  if (elements.titleValue) {
+    elements.titleValue.textContent = title;
+  }
+  document.title = title;
+}
+
 function animateValue(key, nextValue, formatter, element, fallbackText = "N/A") {
   if (!element) {
     return;
@@ -170,6 +187,8 @@ function renderReset(payload) {
 }
 
 function render(payload) {
+  renderTitle(payload);
+
   if (!payload?.ok) {
     elements.statusValue.textContent = updatedStatusFromLastFetch();
     return;

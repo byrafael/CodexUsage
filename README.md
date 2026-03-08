@@ -29,6 +29,8 @@ A side project to monitor ChatGPT Codex usage limits.
    - `/day` for daily token/cost view (from local Codex session logs, USD estimated with LiteLLM pricing)
    - `/week` for weekly token/cost and weekly window status
    - `/session` for short-window session status
+   - `/day/rec` for a live video-style daily render that can be popped into Picture in Picture
+   - `/week/rec` for a live video-style weekly render that can be popped into Picture in Picture
 
    The main dashboard remains at `/`.
 
