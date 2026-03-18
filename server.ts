@@ -1231,6 +1231,15 @@ function resolvePublicPath(pathname: string): string | null {
   return filePath;
 }
 
+function resolveRootAsset(pathname: string): string | null {
+  if (pathname !== "/favicon.svg") {
+    return null;
+  }
+
+  const filePath = join(import.meta.dir, "favicon.svg");
+  return existsSync(filePath) ? filePath : null;
+}
+
 const server = Bun.serve({
   port: PORT,
   async fetch(request: Request) {
@@ -1294,7 +1303,8 @@ const server = Bun.serve({
       }
     }
 
-    const filePath = resolvePublicPath(url.pathname);
+    const filePath =
+      resolveRootAsset(url.pathname) ?? resolvePublicPath(url.pathname);
     if (!filePath) {
       return new Response("Not found", { status: 404 });
     }
